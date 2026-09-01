@@ -1,0 +1,12 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# training artifacts (large, regenerable)
+runs/
+out/
+
+# os noise
+Thumbs.db
+.DS_Store

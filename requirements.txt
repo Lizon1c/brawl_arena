@@ -1,0 +1,8 @@
+numpy
+Pillow
+gymnasium
+imageio
+stable-baselines3
+# CUDA build: install from https://download.pytorch.org/whl/cu126 instead
+torch
+torchvision
