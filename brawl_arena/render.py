@@ -31,6 +31,8 @@ COLORS = {
     "ball_edge": (90, 90, 90),
     "hp_bg": (60, 60, 60),
     "hp_fg": (90, 220, 90),
+    "ammo": (255, 200, 80),
+    "ammo_bg": (70, 60, 45),
     "super_ready": (255, 230, 120),
     "marker": (245, 245, 245),
     "poison": (120, 30, 50),
@@ -170,6 +172,39 @@ def _draw_marker(img: np.ndarray, shape: str, cx: float, cy: float,
             img[y0 + i, max(0, px - half):min(w, px + half + 1)] = color
 
 
+# ------------------------------------------------------------------ HUD
+def _score_pips(img: np.ndarray, counts, s: int):
+    """One small square per point: team 0 top-left, team 1 top-right.
+    Used for brawl_ball goals and knockout round wins (neither was visible
+    in the frame before; gem counts and the showdown ring already are)."""
+    sz = max(2, s - 2)
+    gap = 2
+    y0 = max(2, s // 2) + 3           # below the countdown bar's rows
+    for k in range(counts[0]):
+        x0 = 2 + k * (sz + gap)
+        img[y0:y0 + sz, x0:x0 + sz] = TEAM_RINGS[0]
+    for k in range(counts[1]):
+        x1 = img.shape[1] - 2 - k * (sz + gap)
+        img[y0:y0 + sz, x1 - sz:x1] = TEAM_RINGS[1]
+
+
+def _draw_hud(game: "Game", img: np.ndarray, s: int):
+    """Absolute overlay (identical for every viewer_team): gem_grab win
+    countdown bar across the top + brawl_ball / knockout score pips."""
+    if game.mode == "gem_grab" and game.countdown_team is not None:
+        # dim full-width track + fill proportional to the remaining time,
+        # in the counting team's ring colour
+        frac = max(0.0, min(1.0, game.countdown_t / game.cfg.gem_countdown))
+        bh = max(2, s // 2)
+        img[:bh, :] = COLORS["hp_bg"]
+        img[:bh, :int(img.shape[1] * frac)] = \
+            TEAM_RINGS[game.countdown_team % len(TEAM_RINGS)]
+    if game.mode == "brawl_ball":
+        _score_pips(img, game.scores, s)
+    elif game.mode in ("knockout", "duel"):
+        _score_pips(img, game.round_wins, s)
+
+
 def render(game: "Game", viewer_team: int = 0) -> np.ndarray:
     cfg = game.cfg
     s = cfg.render_scale
@@ -226,19 +261,27 @@ def render(game: "Game", viewer_team: int = 0) -> np.ndarray:
         # class marker above the head
         _draw_marker(img, MARKERS.get(u.archetype, "circle"),
                      u.pos[0], u.pos[1] - radius - 0.32, COLORS["marker"], s)
-        # hp bar above the unit
+        # hp bar above the unit (thicker: legibility audit showed hp was
+        # not decodable from the 90x126 frame at 2px height)
         bar_w = int(radius * 2 * s)
         frac = max(0.0, u.hp / ARCHETYPES[u.archetype]["hp"])
         cx, cy = int(u.pos[0] * s), int(u.pos[1] * s)
+        bar_h = max(2, s // 2)
         y0 = max(0, cy - int(radius * s) - 3)
         x0 = max(0, cx - bar_w // 2)
-        img[y0:y0 + 2, x0:x0 + bar_w] = COLORS["hp_bg"]
-        img[y0:y0 + 2, x0:x0 + int(bar_w * frac)] = COLORS["hp_fg"]
+        img[y0:y0 + bar_h, x0:x0 + bar_w] = COLORS["hp_bg"]
+        img[y0:y0 + bar_h, x0:x0 + int(bar_w * frac)] = COLORS["hp_fg"]
         # gem count pips under the unit
         for k in range(min(u.gems, 10)):
             gx = x0 + k * 3
-            if 0 <= y0 + 4 < img.shape[0] and 0 <= gx < img.shape[1]:
-                img[y0 + 3:y0 + 5, gx:gx + 2] = COLORS["gem"]
+            if 0 <= y0 + bar_h + 2 < img.shape[0] and 0 <= gx < img.shape[1]:
+                img[y0 + bar_h + 1:y0 + bar_h + 3, gx:gx + 2] = COLORS["gem"]
+        # ammo pips under the unit (amber): one per available shot
+        for k in range(3):
+            gx = x0 + k * 3
+            if 0 <= y0 + bar_h + 5 < img.shape[0] and 0 <= gx < img.shape[1]:
+                c = COLORS["ammo"] if u.ammo >= k + 0.5 else COLORS["ammo_bg"]
+                img[y0 + bar_h + 4:y0 + bar_h + 6, gx:gx + 2] = c
         # yellow ring when super is ready
         if u.super_charge >= 1.0:
             _draw_disc(img, u.pos[0], u.pos[1], radius + 0.22,
@@ -250,5 +293,8 @@ def render(game: "Game", viewer_team: int = 0) -> np.ndarray:
     if game.mode == "brawl_ball" and game.ball_carrier is not None:
         _draw_disc(img, game.ball_pos[0], game.ball_pos[1], 0.24,
                    COLORS["ball"], s)
+
+    # HUD last so nothing paints over it
+    _draw_hud(game, img, s)
 
     return img

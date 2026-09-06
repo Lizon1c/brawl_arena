@@ -33,11 +33,16 @@ Teacher track (privileged state, PPO):
 - `dagger_teacher.py` — DAgger rounds
 - `eval_teacher.py`, `record_teacher.py`
 
-Student track (raw pixels, 90x126, 16-frame window):
-- `student_vision.py` — DINOv2-S/14 + CPG oscillator bank, discrete heads
-- `student_omni.py` — same trunk, continuous move/aim joysticks
-  (current best: ~40% vs scripted bot in gem grab from pixels alone)
-- `distill_student.py`, `eval_student_omni.py`
+Student track (raw pixels, 90x126):
+- `student_vision.py` — DINOv2-S/14 + CPG oscillator bank, discrete heads (legacy)
+- `student_omni.py` — same trunk, continuous move/aim joysticks (legacy BC track)
+- `student_rl.py` — **current (v5.3)**: trainable CNN fine stream -> 384-d feat ->
+  FeatRing(4155) -> dual-scale windows (fine 30 + coarse 128 attention-pool) ->
+  4-layer causal RoPE transformer -> readout + 4 action heads + value head +
+  next-frame pred head. Online PPO + DAgger + spectate BC over a 9-env mix
+  (gem/duo vs bots, gem/ball/ko/duel self-play, spectate), 3.92M params.
+- `student_cnn_pretrain.py`, `student_tx_pretrain.py` — pretraining stages
+- `scripts/eval_duel.py` — duel combat-metrics eval (argmax + sampled)
 - `run_chunked.sh` — continue training in 10-epoch chunks with periodic
   in-game evaluation until a target winrate
 

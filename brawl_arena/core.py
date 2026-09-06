@@ -9,6 +9,8 @@ Supported modes (all original designs):
     brawl_ball -- 3v3, carry/kick the ball into the enemy goal zone.
     knockout   -- 3v3 rounds, no respawn, first to 2 round wins.
     showdown   -- 6-way free-for-all with a shrinking poison ring.
+    duel       -- 1v1, mirrored archetype, knockout round machinery; the
+                  pure-combat teacher: fast games, clean credit assignment.
 
 World units are tiles (float coordinates). Map is a grid of tiles.
 """
@@ -26,7 +28,7 @@ TILE_CRATE = 3         # destructible by supers
 TILE_GOAL = 4          # brawl_ball goal zone (blocks units, not the ball)
 TILE_FENCE = 5         # blocks unit movement, projectiles fly over it
 
-MODES = ("gem_grab", "brawl_ball", "knockout", "showdown")
+MODES = ("gem_grab", "brawl_ball", "knockout", "showdown", "duel")
 
 MAX_UNITS = 6          # fixed unit slots so state_dim is constant across modes
 
@@ -111,6 +113,9 @@ class Config:
     rounds_to_win: int = 2
     max_rounds: int = 5
     round_time_limit: float = 60.0
+    # handicap matches (e.g. (2, 1): two units vs one -- the duo curriculum);
+    # None = units_per_team on both sides. Only used by team-based modes.
+    team_sizes: tuple | None = None
     # showdown
     n_showdown_units: int = 6
     poison_start_delay: float = 15.0
@@ -249,8 +254,29 @@ class Game:
             self.poison_max = math.hypot(cx, cy) + 1.0
             self.poison_radius = self.poison_max
             self.poison_timer = cfg.poison_start_delay
+        elif self.mode == "duel":
+            # 1v1 mirror match: one unit per team, SAME archetype on both
+            # sides (pure skill, no counter-pick), knockout round machinery.
+            if self.map_spawns:
+                sides = [[], []]
+                for sx, sy in self.map_spawns:
+                    sides[0 if sx < w / 2 else 1].append((sx + 0.5, sy + 0.5))
+                spots = [sides[0][0], sides[1][0]]
+            else:
+                spots = [(2.5, h / 2.0), (w - 2.5, h / 2.0)]
+            arch = ARCHETYPE_NAMES[int(self.rng.integers(len(ARCHETYPE_NAMES)))]
+            for team in (0, 1):
+                x, y = spots[team]
+                self._clear_area(x, y, 1)
+                spawn = np.array([x, y], dtype=np.float64)
+                self.units.append(Unit(team=team, archetype=arch,
+                                       pos=spawn.copy(), spawn=spawn,
+                                       hp=ARCHETYPES[arch]["hp"],
+                                       ammo=cfg.max_ammo))
         else:
-            n = cfg.units_per_team
+            n0, n1 = (cfg.team_sizes if cfg.team_sizes
+                      else (cfg.units_per_team, cfg.units_per_team))
+            n = max(n0, n1)
             # same random roster for both teams keeps the matchup fair
             roster = [ARCHETYPE_NAMES[i] for i in
                       self.rng.permutation(len(ARCHETYPE_NAMES))[:n]]
@@ -261,7 +287,7 @@ class Game:
                     sides[0 if sx < w / 2 else 1].append((sx + 0.5, sy + 0.5))
                 for team in (0, 1):
                     spots = sorted(sides[team], key=lambda p: p[1])
-                    for i in range(n):
+                    for i in range((n0, n1)[team]):
                         x, y = spots[i % len(spots)]
                         self._clear_area(x, y, 1)
                         spawn = np.array([x, y], dtype=np.float64)
@@ -273,7 +299,6 @@ class Game:
                 # symmetric about the true map centre (w/2, h/2): ball and
                 # gem mine sit at (w/2, h/2), so spawns must too, otherwise
                 # one side is permanently closer to the mid objective
-                ys = np.linspace(2.5, h - 2.5, n + 2)[1:-1]
                 # clear the spawn columns (keep bushes). Units spawn at x=2 /
                 # x=w-3 with radius ~0.42, so their body reaches one column
                 # further out; clear 3 columns per side to avoid spawning
@@ -283,8 +308,10 @@ class Game:
                     sub[(sub == TILE_WALL) | (sub == TILE_CRATE)
                         | (sub == TILE_FENCE)] = TILE_EMPTY
                 for team in (0, 1):
+                    nt = (n0, n1)[team]
                     x = 2.5 if team == 0 else w - 2.5
-                    for i in range(n):
+                    ys = np.linspace(2.5, h - 2.5, nt + 2)[1:-1]
+                    for i in range(nt):
                         spawn = np.array([x, ys[i]], dtype=np.float64)
                         self.units.append(Unit(team=team, archetype=roster[i],
                                                pos=spawn.copy(), spawn=spawn,
@@ -396,7 +423,7 @@ class Game:
             self._step_gem_grab()
         elif self.mode == "brawl_ball":
             self._step_brawl_ball()
-        elif self.mode == "knockout":
+        elif self.mode in ("knockout", "duel"):
             self._step_knockout()
         elif self.mode == "showdown":
             self._step_showdown()
@@ -812,7 +839,7 @@ class Game:
         elif self.mode == "brawl_ball":
             mine = self.scores[team] / cfg.goals_to_win
             enemy = self.scores[1 - team] / cfg.goals_to_win
-        elif self.mode == "knockout":
+        elif self.mode in ("knockout", "duel"):
             mine = self.round_wins[team] / cfg.rounds_to_win
             enemy = self.round_wins[1 - team] / cfg.rounds_to_win
         else:
@@ -836,13 +863,15 @@ class Game:
             if self.ball_carrier is not None:
                 mf[5] = float(self.ball_carrier == idx)
                 mf[6] = float(self.units[self.ball_carrier].team == me.team)
-        elif self.mode == "knockout":
+        elif self.mode in ("knockout", "duel"):
             mf[0] = self.round_num / cfg.max_rounds
             mf[1] = self.round_t / cfg.round_time_limit
+            n_team = max(1, sum(1 for u in self.units if u.team == me.team))
+            n_foe = max(1, sum(1 for u in self.units if u.team != me.team))
             mf[2] = sum(1 for u in self.units
-                        if u.team == me.team and u.alive) / cfg.units_per_team
+                        if u.team == me.team and u.alive) / n_team
             mf[3] = sum(1 for u in self.units
-                        if u.team != me.team and u.alive) / cfg.units_per_team
+                        if u.team != me.team and u.alive) / n_foe
         elif self.mode == "showdown":
             center = np.array([cfg.map_w / 2.0, cfg.map_h / 2.0])
             mf[0] = self.poison_radius / self.poison_max

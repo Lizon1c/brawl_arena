@@ -69,7 +69,7 @@ label{margin-right:6px}
 </div>
 <script>
 const SIZES = {gem_grab:[21,15], brawl_ball:[21,15], knockout:[17,13],
-               showdown:[25,19]};
+               showdown:[25,19], duel:[17,13]};
 const PAL = [
  {ch:'.', label:'empty', c:'#20242a'},
  {ch:'#', label:'wall', c:'#7a7a82'},
@@ -77,7 +77,7 @@ const PAL = [
  {ch:'b', label:'bush', c:'#24602c'},
  {ch:'f', label:'fence', c:'#583822'},
  {ch:'g', label:'goal', c:'#e8c858', modes:['brawl_ball']},
- {ch:'s', label:'spawn', c:'#f0f0f0', modes:['brawl_ball','knockout','showdown']},
+ {ch:'s', label:'spawn', c:'#f0f0f0', modes:['brawl_ball','knockout','showdown','duel']},
  {ch:'m', label:'gem mine (fixed centre)', c:'#c83cdc', modes:['gem_grab']},
 ];
 const CELL = 26;
@@ -114,6 +114,7 @@ function mirrors(x,y){
   return [[x,y],[x,H-1-y],[W-1-x,y],[W-1-x,H-1-y]];
 }
 function paintAt(cx,cy,ch){
+  if(cx<0||cy<0||cx>=W||cy>=H) return;   // edge clicks: no off-grid cells
   for(const [x,y] of mirrors(cx,cy)) grid[y][x]=ch;
   draw();
 }
@@ -151,14 +152,20 @@ function cellFromEvent(e){
 let painting = false;
 const undoStack = [];
 function pushUndo(){
-  undoStack.push(grid.map(r=>r.join('')));
+  undoStack.push({mode, W, H, rows: grid.map(r=>r.join(''))});
   if(undoStack.length > 200) undoStack.shift();
 }
 function undo(){
-  const rows = undoStack.pop();
-  if(!rows){ status('nothing to undo'); return; }
-  grid = rows.map(r=>r.split(''));
-  draw(); status('undo');
+  const snap = undoStack.pop();
+  if(!snap){ status('nothing to undo'); return; }
+  // restore mode+size WITH the grid: switching modes pushes the old-size
+  // grid onto the stack, and restoring it under the new mode's W/H used to
+  // corrupt the save (invisible off-canvas columns -> ragged rows)
+  mode = snap.mode; W = snap.W; H = snap.H;
+  document.getElementById('mode').value = mode;
+  cv.width = W*CELL; cv.height = H*CELL;
+  grid = snap.rows.map(r=>r.split(''));
+  buildPalette(); draw(); status('undo');
 }
 cv.addEventListener('mousedown', e=>{
   painting = true;
@@ -197,8 +204,10 @@ document.getElementById('mode').onchange = e=>{ mode=e.target.value;
 document.getElementById('sym').onchange = e=>{ sym=e.target.value; };
 document.getElementById('new').onclick = ()=>{ pushUndo(); freshGrid(); status('new map'); };
 document.getElementById('save').onclick = async ()=>{
+  // slice to the visible W×H region: any stray off-canvas cell from older
+  // sessions can never reach the server
   const body = {mode, name:document.getElementById('name').value,
-                rows:grid.map(r=>r.join(''))};
+                rows:grid.slice(0,H).map(r=>r.slice(0,W).join(''))};
   const res = await fetch('/api/save', {method:'POST',
     headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
   const data = await res.json();
@@ -243,6 +252,28 @@ def _builtin_json() -> dict:
             tiles = _expand(quadrant)
             out[mode][name] = ["".join(_TILE_TO_CHAR[int(v)] for v in row)
                                for row in tiles]
+    # user's own maps are loadable too (prefixed "custom/") so editing can
+    # continue from a saved design instead of starting over. Read the files
+    # directly: maps that FAIL validation (CUSTOM_MAPS skips them) are often
+    # exactly the ones the user wants to reopen and fix.
+    if os.path.isdir(CUSTOM_MAPS_DIR):
+        for fn in sorted(os.listdir(CUSTOM_MAPS_DIR)):
+            if not fn.endswith(".txt"):
+                continue
+            mode = next((m for m in MODES if fn.startswith(m + "_")), None)
+            if mode is None:
+                continue
+            try:
+                tiles, spawns = parse_ascii_map(
+                    open(os.path.join(CUSTOM_MAPS_DIR, fn),
+                         encoding="ascii").read())
+            except Exception:
+                continue
+            sset = set(map(tuple, spawns))
+            rows = ["".join("s" if (x, y) in sset else _TILE_TO_CHAR[int(v)]
+                            for x, v in enumerate(row))
+                    for y, row in enumerate(tiles)]
+            out.setdefault(mode, {})[f"custom/{fn[len(mode) + 1:-4]}"] = rows
     return out
 
 

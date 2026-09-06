@@ -37,7 +37,7 @@ _CHAR_TO_TILE = {".": TILE_EMPTY, "#": TILE_WALL, "b": TILE_BUSH,
                  "c": TILE_CRATE, "g": TILE_GOAL, "f": TILE_FENCE}
 
 _MODE_SIZE = {"gem_grab": (21, 15), "brawl_ball": (21, 15),
-              "knockout": (17, 13), "showdown": (25, 19)}
+              "knockout": (17, 13), "showdown": (25, 19), "duel": (17, 13)}
 
 
 def _expand(quadrant: list[str]) -> np.ndarray:
@@ -175,6 +175,7 @@ MAPS = {
                    "center_cover": _BALL_COVER},
     "knockout": {"duel_ring": _KO_RING, "quad_cover": _KO_COVER},
     "showdown": {},
+    "duel": {},          # 1v1 falls back to the knockout arenas in sample_map
 }
 
 
@@ -186,6 +187,9 @@ def sample_map(mode: str, rng: np.random.Generator):
     mode's default spawn layout."""
     pool = [(None, _expand(q)) for q in MAPS[mode].values()]
     pool += [(e["spawns"], e["tiles"]) for e in CUSTOM_MAPS.get(mode, [])]
+    if mode == "duel":
+        # 1v1 plays on its own custom maps plus the knockout arenas
+        pool += [(None, _expand(q)) for q in MAPS["knockout"].values()]
     spawns, tiles = pool[int(rng.integers(len(pool)))]
     return tiles.copy(), spawns
 
@@ -205,7 +209,8 @@ def parse_ascii_map(text: str):
     rows = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
     assert rows, "empty map"
     w = len(rows[0])
-    assert all(len(r) == w for r in rows), "ragged rows"
+    bad = [(i, len(r)) for i, r in enumerate(rows) if len(r) != w]
+    assert not bad, f"ragged rows: row(s) {bad}, expected width {w}"
     spawns = []
     tiles = np.zeros((len(rows), w), dtype=np.int8)
     for y, row in enumerate(rows):
@@ -338,8 +343,9 @@ def _check_map(mode: str, name: str, tiles: np.ndarray,
         if spawns:
             # custom 3v3 spawns (brawl_ball / knockout): 3 per side, each
             # free, and every marker must have its 180-degree twin (a
-            # double-mirror-symmetric set automatically satisfies this)
-            n_per_side = 3
+            # double-mirror-symmetric set automatically satisfies this).
+            # duel is 1v1: exactly 1 per side.
+            n_per_side = 1 if mode == "duel" else 3
             left = [s for s in spawns if s[0] < w / 2]
             right = [s for s in spawns if s[0] > w / 2]
             assert len(left) == n_per_side and len(right) == n_per_side, \

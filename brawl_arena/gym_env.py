@@ -29,7 +29,7 @@ class BrawlArenaEnv(gym.Env):
 
     def __init__(self, config: Config | None = None, seed: int | None = None,
                  opponent_policy=None, teammate_policy=None,
-                 include_frame: bool = True):
+                 include_frame: bool = True, n_students: int = 1):
         super().__init__()
         self.cfg = config or Config()
         self.game = Game(self.cfg, seed=seed)
@@ -38,6 +38,9 @@ class BrawlArenaEnv(gym.Env):
         self.opponent_policy = opponent_policy or ScriptedBot(seed=seed)
         self.teammate_policy = teammate_policy or ScriptedBot(
             seed=None if seed is None else seed + 1)
+        # units 0..n_students-1 are driven externally (learning students);
+        # units from n_students on are driven by the policy hooks
+        self.n_students = n_students
         self.include_frame = include_frame
         self._last_mine = 0.0
         self._last_enemy = 0.0
@@ -73,71 +76,117 @@ class BrawlArenaEnv(gym.Env):
         self._last_carry_ours = False
         return self._obs(), {}
 
-    def _reward(self) -> float:
+    def set_game(self, game: Game):
+        """Swap in a restored mid-game state (snapshot resume).
+
+        The differential-reward baselines are re-seeded from the restored
+        state so the first step after the swap does not see a spurious
+        delta, and the observation is regenerated from the new game."""
+        self.game = game
+        self.cfg = game.cfg   # deepcopied snapshots carry their own cfg copy
+        if game.mode == "gem_grab":
+            self._last_mine, self._last_enemy = game._relative_score(0)
+        else:
+            self._last_mine = 0.0
+            self._last_enemy = 0.0
+        self._last_carry_ours = game.mode == "brawl_ball" \
+            and game.ball_carrier is not None \
+            and game.units[game.ball_carrier].team == 0
+        return self._obs(), {}
+
+    def _reward(self):
+        """Scalar reward for n_students == 1 (legacy behaviour, unchanged);
+        a list of per-student rewards for multi-student envs (duo): own
+        hits/kills/deaths are per-unit, round/game outcomes are shared."""
         g = self.game
-        reward = -0.001
+        ns = self.n_students
+        rs = [-0.001] * ns
         if g.mode == "gem_grab":
             mine, enemy = g._relative_score(0)
-            reward += 2.0 * (mine - self._last_mine) - 2.0 * (enemy - self._last_enemy)
+            rs[0] += 2.0 * (mine - self._last_mine) - 2.0 * (enemy - self._last_enemy)
             self._last_mine, self._last_enemy = mine, enemy
 
         for ev in g.events:
-            if g.mode == "knockout":
-                if ev[0] == "kill":
+            if g.mode in ("knockout", "duel"):
+                if ev[0] == "hit":
                     _, atk, victim = ev
-                    if g.units[victim].team == 0:
-                        reward -= 1.0
-                    elif atk is not None and g.units[atk].team == 0:
-                        reward += 1.0
+                    for i in range(ns):
+                        if atk == i:
+                            rs[i] += 0.05      # landed a shot
+                        if victim == i:
+                            rs[i] -= 0.05      # got hit
+                elif ev[0] == "kill":
+                    _, atk, victim = ev
+                    if ns == 1:
+                        if g.units[victim].team == 0:
+                            rs[0] -= 1.0
+                        elif atk is not None and g.units[atk].team == 0:
+                            rs[0] += 1.0
+                    else:
+                        for i in range(ns):
+                            if victim == i:
+                                rs[i] -= 1.0
+                            elif g.units[victim].team == 0:
+                                rs[i] -= 0.3   # student teammate went down
+                            if atk is not None and atk == i \
+                                    and g.units[victim].team != 0:
+                                rs[i] += 1.0
                 elif ev[0] == "round_end":
                     if ev[1] is not None:
-                        reward += 2.0 if ev[1] == 0 else -2.0
+                        for i in range(ns):
+                            rs[i] += 2.0 if ev[1] == 0 else -2.0
             elif g.mode == "showdown":
                 if ev[0] == "kill":
                     _, atk, victim = ev
                     if victim == 0:
-                        reward -= 1.5
+                        rs[0] -= 1.5
                     elif atk == 0:
-                        reward += 1.5
+                        rs[0] += 1.5
             elif g.mode == "brawl_ball":
-                if ev[0] == "goal":
-                    reward += 1.0 if ev[1] == 0 else -1.0
+                if ev[0] == "hit":
+                    _, atk, victim = ev
+                    if atk == 0:
+                        rs[0] += 0.05      # landed a shot
+                    elif victim == 0:
+                        rs[0] -= 0.05      # got hit
+                elif ev[0] == "goal":
+                    rs[0] += 1.0 if ev[1] == 0 else -1.0
             elif g.mode == "gem_grab" and self.cfg.reward_shaping:
                 if ev[0] == "hit":
                     _, atk, victim = ev
                     if atk == 0:
-                        reward += 0.05      # landed a shot
+                        rs[0] += 0.05      # landed a shot
                     elif victim == 0:
-                        reward -= 0.05      # got hit
+                        rs[0] -= 0.05      # got hit
                 elif ev[0] == "kill":
                     _, atk, victim = ev
                     if victim == 0:
-                        reward -= 2.0       # died: the big penalty
+                        rs[0] -= 2.0       # died: the big penalty
                     elif atk == 0:
-                        reward += 1.0       # own kill
+                        rs[0] += 1.0       # own kill
                     elif g.units[victim].team == 0:
-                        reward -= 0.3       # teammate died
+                        rs[0] -= 0.3       # teammate died
                     elif atk is not None and g.units[atk].team == 0:
-                        reward += 0.3       # teammate's kill
+                        rs[0] += 0.3       # teammate's kill
         g.events = []
 
         if g.mode == "brawl_ball":
             carry_ours = g.ball_carrier is not None \
                 and g.units[g.ball_carrier].team == 0
             if carry_ours and not self._last_carry_ours:
-                reward += 0.05
+                rs[0] += 0.05
             self._last_carry_ours = carry_ours
         elif g.mode == "showdown" and g.units[0].alive:
-            reward += 0.002
+            rs[0] += 0.002
 
         if g.mode == "gem_grab" and self.cfg.reward_shaping:
             u0 = g.units[0]
             if u0.alive:
-                reward += 0.002              # survival, ~+0.03/s
-                reward += 0.002 * u0.gems    # gem holding, ~+0.15/s at 5
+                rs[0] += 0.002              # survival, ~+0.03/s
+                rs[0] += 0.002 * u0.gems    # gem holding, ~+0.15/s at 5
                 team = sum(u.gems for u in g.units if u.team == 0)
                 if team >= g.cfg.gem_carry_to_win:
-                    reward += 0.02           # countdown turtle, ~+0.3/s
+                    rs[0] += 0.02           # countdown turtle, ~+0.3/s
                 st = ARCHETYPES[u0.archetype]
                 rng_eff = st["melee_range"] if st["melee"] \
                     else st["proj_range"]
@@ -145,17 +194,21 @@ class BrawlArenaEnv(gym.Env):
                          for u in g.units if u.team != 0 and u.alive),
                         default=np.inf)
                 if rng_eff * 0.6 <= d <= rng_eff:
-                    reward += 0.003          # fighting at proper range
+                    rs[0] += 0.003          # fighting at proper range
 
         if g.done and g.winner is not None:
-            reward += 5.0 if g.winner == 0 else -5.0
-        return reward
+            for i in range(ns):
+                rs[i] += 5.0 if g.winner == 0 else -5.0
+        return rs[0] if ns == 1 else rs
 
     def step(self, action):
         my_team = self.game.units[0].team
-        # group the other units by policy so each policy does one batched call
+        # one action dict per student unit (0..n_students-1); a bare dict is
+        # the legacy single-student form
+        acts = list(action) if isinstance(action, (list, tuple)) else [action]
+        # group the remaining units by policy so each policy does one batched call
         by_policy = {}
-        for i in range(1, len(self.game.units)):
+        for i in range(self.n_students, len(self.game.units)):
             u = self.game.units[i]
             policy = self.teammate_policy if u.team == my_team else self.opponent_policy
             by_policy.setdefault(id(policy), (policy, []))[1].append(i)
@@ -167,9 +220,11 @@ class BrawlArenaEnv(gym.Env):
                 batch = [policy.act(self.game, i) for i in idxs]
             for i, a in zip(idxs, batch):
                 pol_actions[i] = a
-        actions = [Action(move=action["move"], aim=action["aim"],
-                          shoot=bool(action["shoot"]), use_super=bool(action["super"]))]
-        actions += [pol_actions[i] for i in range(1, len(self.game.units))]
+        actions = [Action(move=a["move"], aim=a["aim"],
+                          shoot=bool(a["shoot"]), use_super=bool(a["super"]))
+                   for a in acts]
+        actions += [pol_actions[i]
+                    for i in range(self.n_students, len(self.game.units))]
         self.game.step(actions)
 
         reward = self._reward()

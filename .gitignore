@@ -6,6 +6,8 @@ __pycache__/
 # training artifacts (large, regenerable)
 runs/
 out/
+tmp_frames/
+hud_check.png
 
 # os noise
 Thumbs.db

@@ -46,7 +46,7 @@ def play_rl(net, buf, bf16):
 
 omni = OmniStudent().to(device).eval()
 omni.load_state_dict(torch.load(CKPT_OMNI, map_location="cpu"))
-rl = RLStudent().to(device).eval()
+rl = RLStudent(encoder="osc").to(device).eval()
 rl.load_state_dict(torch.load(CKPT_RL, map_location="cpu"))
 
 res = {"omni_fp32": [], "rl_bf16": [], "rl_fp32": []}
